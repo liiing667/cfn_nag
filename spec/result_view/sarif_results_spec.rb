@@ -1,5 +1,6 @@
 require 'spec_helper'
 require 'cfn-nag/cfn_nag'
+require 'cfn-nag/custom_rules/S3BucketPolicyWildcardActionRule'
 
 describe SarifResults do
   # Method of suppressing stderr and stdout was found on StackOverflow here:
@@ -51,6 +52,127 @@ describe SarifResults do
 
         expect(sarif_driver[:rules].first).to include(:id, :name, :fullDescription)
       end
+    end
+  end
+
+  describe '#rule_definition' do
+    before(:each) do
+      @rule_registry = RuleRegistry.new
+      [
+        RuleDefinition.new(id: 'F1', name: 'Fail1', type: RuleDefinition::FAILING_VIOLATION, message: 'Bad Security Setting'),
+        RuleDefinition.new(id: 'F2', name: 'Fail2', type: RuleDefinition::FAILING_VIOLATION, message: 'Missing Security Setting'),
+        RuleDefinition.new(id: 'F3', name: 'Fail3', type: RuleDefinition::FAILING_VIOLATION, message: 'Invalid Security Setting'),
+        RuleDefinition.new(id: 'F4', name: 'Fail4', type: RuleDefinition::FAILING_VIOLATION, message: 'Default Security Setting')
+      ].each { |rule_definition| @rule_registry.instance_variable_get(:@rules) << rule_definition }
+    end
+
+    it 'returns the registered rule definition for a finding' do
+      rule_definition = SarifResults.new.rule_definition('F1', @rule_registry)
+
+      expect(rule_definition).to be(@rule_registry.by_id('F1'))
+    end
+
+    it 'falls back to a synthetic definition for findings without a registered rule' do
+      rule_definition = SarifResults.new.rule_definition('FATAL', @rule_registry)
+
+      expect(rule_definition.id).to eq('FATAL')
+      expect(rule_definition.type).to eq(RuleDefinition::FAILING_VIOLATION)
+    end
+  end
+
+  describe '#render' do
+    before(:each) do
+      $stdout.string = ''
+
+      @rule_registry = RuleRegistry.new
+      [
+        RuleDefinition.new(id: 'F1', name: 'Fail1', type: RuleDefinition::FAILING_VIOLATION, message: 'Bad Security Setting'),
+        RuleDefinition.new(id: 'F2', name: 'Fail2', type: RuleDefinition::FAILING_VIOLATION, message: 'Missing Security Setting'),
+        RuleDefinition.new(id: 'F3', name: 'Fail3', type: RuleDefinition::FAILING_VIOLATION, message: 'Invalid Security Setting')
+      ].each { |rule_definition| @rule_registry.instance_variable_get(:@rules) << rule_definition }
+
+      @results = [
+        {
+          filename: 'bob.txt',
+          file_results: {
+            violations: [
+              Violation.new(id: 'F2',
+                            name: 'Fail2',
+                            type: RuleDefinition::FAILING_VIOLATION,
+                            message: 'Missing Security Setting',
+                            logical_resource_ids: ['resource1', 'resource2'],
+                            line_numbers: [54, 1039]),
+              Violation.new(id: 'F1',
+                            name: 'Fail1',
+                            type: RuleDefinition::FAILING_VIOLATION,
+                            message: 'Bad Security Setting',
+                            logical_resource_ids: ['resource3'],
+                            line_numbers: [7])
+            ]
+          }
+        }
+      ]
+    end
+
+    it 'publishes only matched rules and points every result at the correct rule index' do
+      SarifResults.new.render(@results, @rule_registry)
+
+      sarif_report = JSON.parse($stdout.string, symbolize_names: true)
+      rules = sarif_report[:runs].first[:tool][:driver][:rules]
+      sarif_results = sarif_report[:runs].first[:results]
+
+      expect(rules.map { |rule| rule[:id] }).to eq(%w[CFN_NAG_F2 CFN_NAG_F1])
+      expect(sarif_results.map { |result| result[:ruleIndex] }).to eq([0, 0, 1])
+      sarif_results.each do |result|
+        rule = rules[result[:ruleIndex]]
+        expect(result[:ruleId]).to eq(rule[:id])
+      end
+    end
+
+    it 'preserves the line number and logical resource of each finding' do
+      SarifResults.new.render(@results, @rule_registry)
+
+      sarif_report = JSON.parse($stdout.string, symbolize_names: true)
+      sarif_results = sarif_report[:runs].first[:results]
+
+      expect(sarif_results.map { |result| result[:locations].first[:physicalLocation][:region][:startLine] })
+        .to eq([54, 1039, 7])
+      expect(sarif_results.map { |result| result[:locations].first[:logicalLocations].first[:name] })
+        .to eq(%w[resource1 resource2 resource3])
+    end
+
+    it 'does not publish rules filtered out by profile or deny list' do
+      filtered_results = [
+        {
+          filename: 'bob.txt',
+          file_results: {
+            violations: [@results.first[:file_results][:violations].first]
+          }
+        }
+      ]
+
+      SarifResults.new.render(filtered_results, @rule_registry)
+
+      sarif_report = JSON.parse($stdout.string, symbolize_names: true)
+      rules = sarif_report[:runs].first[:tool][:driver][:rules]
+      sarif_results = sarif_report[:runs].first[:results]
+
+      expect(rules.map { |rule| rule[:id] }).to eq(['CFN_NAG_F2'])
+      expect(sarif_results.map { |result| result[:ruleIndex] }).to eq([0, 0])
+    end
+
+    it 'omits rules and results for violations without logical resource ids' do
+      fatal_violation = Violation.fatal_violation('boom')
+      @results.first[:file_results][:violations] << fatal_violation
+
+      SarifResults.new.render(@results, @rule_registry)
+
+      sarif_report = JSON.parse($stdout.string, symbolize_names: true)
+      rules = sarif_report[:runs].first[:tool][:driver][:rules]
+      sarif_results = sarif_report[:runs].first[:results]
+
+      expect(rules.map { |rule| rule[:id] }).to eq(%w[CFN_NAG_F2 CFN_NAG_F1])
+      expect(sarif_results.length).to eq(3)
     end
   end
 
@@ -120,6 +242,33 @@ describe SarifResults do
         expect(location[:logicalLocations].length).to eq(1)
         expect(location[:logicalLocations].first).to include(:name)
         expect(location[:logicalLocations].first[:name]).to eq('resource2')
+      end
+    end
+
+    context 'with a rule index' do
+      before(:each) do
+        @violation = S3BucketPolicyWildcardActionRule.new.violation(['resource1'], [54])
+      end
+
+      it 'includes the rule index so consumers can resolve the matching rule' do
+        sarif_results = SarifResults.new.sarif_result(file_name: 'bob.txt',
+                                                      violation: @violation,
+                                                      index: 0,
+                                                      rule_index: 3)
+
+        expect(sarif_results[:ruleIndex]).to eq(3)
+      end
+    end
+
+    context 'without a rule index' do
+      before(:each) do
+        @violation = S3BucketPolicyWildcardActionRule.new.violation(['resource1'], [54])
+      end
+
+      it 'omits the rule index and keeps the legacy result shape' do
+        sarif_results = SarifResults.new.sarif_result(file_name: 'bob.txt', violation: @violation, index: 0)
+
+        expect(sarif_results).not_to include(:ruleIndex)
       end
     end
   end
