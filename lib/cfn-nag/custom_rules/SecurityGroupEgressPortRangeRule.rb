@@ -22,6 +22,8 @@ class SecurityGroupEgressPortRangeRule < BaseRule
   def audit_impl(cfn_model)
     violating_security_groups = cfn_model.security_groups.select do |security_group|
       violating_egresses = security_group.egresses.select do |egress|
+        next false if egress.nil?
+
         egress.fromPort != egress.toPort
       end
 

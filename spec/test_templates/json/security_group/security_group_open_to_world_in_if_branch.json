@@ -1,0 +1,44 @@
+{
+  "Conditions": {
+    "RestrictIngress": {
+      "Fn::Equals": [
+        {
+          "Ref": "Environment"
+        },
+        "production"
+      ]
+    }
+  },
+  "Parameters": {
+    "Environment": {
+      "Type": "String",
+      "Default": "development"
+    }
+  },
+  "Resources": {
+    "ConditionalSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "security group with conditional ingress",
+        "VpcId": "vpc-12345678",
+        "SecurityGroupIngress": {
+          "Fn::If": [
+            "RestrictIngress",
+            {
+              "CidrIp": "10.0.0.0/8",
+              "FromPort": 443,
+              "ToPort": 443,
+              "IpProtocol": "tcp"
+            },
+            {
+              "CidrIp": "0.0.0.0/0",
+              "FromPort": 443,
+              "ToPort": 443,
+              "IpProtocol": "tcp"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

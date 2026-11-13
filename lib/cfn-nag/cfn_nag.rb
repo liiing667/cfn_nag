@@ -2,8 +2,8 @@
 
 require_relative 'custom_rule_loader'
 require_relative 'rule_registry'
-require_relative 'violation_filtering'
 require_relative 'template_discovery'
+require_relative 'condition_branch_auditor'
 require_relative 'result_view/stdout_results'
 require_relative 'result_view/simple_stdout_results'
 require_relative 'result_view/colored_stdout_results'
@@ -13,8 +13,6 @@ require 'cfn-model'
 
 # Top-level CfnNag class for running profiles
 class CfnNag
-  include ViolationFiltering
-
   DEFAULT_TEMPLATE_PATTERN = '..*\.json$|..*\.yaml$|..*\.yml$|..*\.template$'
 
   def initialize(config:)
@@ -82,25 +80,15 @@ class CfnNag
   # Return a hash with failure count
   #
   def audit(cloudformation_string:, parameter_values_string: nil, condition_values_string: nil)
-    violations = []
     begin
-      cfn_model = CfnParser.new.parse cloudformation_string,
-                                      parameter_values_string,
-                                      true,
-                                      condition_values_string
-      CustomRuleLoader.rule_arguments = @config.rule_arguments
-      violations += @config.custom_rule_loader.execute_custom_rules(
-        cfn_model,
-        @config.custom_rule_loader.rule_definitions
+      violations = ConditionBranchAuditor.new(config: @config).audit(
+        cloudformation_string, parameter_values_string, condition_values_string
       )
-
-      violations = filter_violations_by_deny_list_and_profile(violations)
-      violations = mark_line_numbers_and_element_types(violations, cfn_model)
     rescue RuleRepoException, Psych::SyntaxError, ParserError => fatal_error
-      violations << Violation.fatal_violation(fatal_error.to_s)
+      violations = [Violation.fatal_violation(fatal_error.to_s)]
     rescue JSON::ParserError => json_parameters_error
       error = "JSON Parameter values parse error: #{json_parameters_error}"
-      violations << Violation.fatal_violation(error)
+      violations = [Violation.fatal_violation(error)]
     end
 
     violations = prune_fatal_violations(violations) if @config.ignore_fatal
@@ -117,35 +105,6 @@ class CfnNag
   end
 
   private
-
-  def mark_line_numbers_and_element_types(violations, cfn_model)
-    violations.each do |violation|
-      violation.logical_resource_ids.each do |logical_resource_id|
-        violation.line_numbers << cfn_model.line_numbers[logical_resource_id]
-        violation.element_types << cfn_model.element_types[logical_resource_id]
-      end
-    end
-
-    violations
-  end
-
-  def filter_violations_by_deny_list_and_profile(violations)
-    violations = filter_violations_by_profile(
-      profile_definition: @config.profile_definition,
-      rule_definitions: @config.custom_rule_loader.rule_definitions,
-      violations: violations
-    )
-
-    # this must come after - deny list should always win
-    filter_violations_by_deny_list(
-      deny_list_definition: @config.deny_list_definition,
-      rule_definitions: @config.custom_rule_loader.rule_definitions,
-      violations: violations
-    )
-  rescue StandardError => deny_list_or_profile_parse_error
-    violations << Violation.fatal_violation(deny_list_or_profile_parse_error.to_s)
-    violations
-  end
 
   def audit_result(violations)
     {

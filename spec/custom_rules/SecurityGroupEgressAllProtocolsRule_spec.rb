@@ -35,4 +35,15 @@ describe SecurityGroupEgressAllProtocolsRule do
       expect(actual_logical_resource_ids).to eq expected_logical_resource_ids
     end
   end
+
+  context 'when a false Fn::If branch yields an empty egress entry' do
+    it 'skips the empty entry without raising' do
+      cfn_model = CfnParser.new.parse(
+        read_test_template('yaml/security_group/pesky_if.yml'),
+        nil, true, '{"MicroInt":false}'
+      )
+
+      expect { SecurityGroupEgressAllProtocolsRule.new.audit_impl(cfn_model) }.not_to raise_error
+    end
+  end
 end
